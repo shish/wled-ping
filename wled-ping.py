@@ -1,7 +1,8 @@
-import asyncio
+#!/usr/bin/env python3
 
+import asyncio
 from datetime import datetime
-from wled import WLED
+import wled
 import math
 import subprocess
 import re
@@ -11,20 +12,18 @@ from time import time, sleep
 
 
 def ping(host: str) -> t.Generator[None, None, t.Optional[int]]:
-    proc = subprocess.Popen(['ping', '-c', '4', host], stdout=subprocess.PIPE, text=True)
-    while True:
-        line = proc.stdout.readline()
-        # print(line.strip())
-        if line == "":
-            break
-        if line.strip() == "" or line.startswith(("PING", "---", "4 packets", "round-trip")):
-            pass
-        elif line.startswith("Request timeout"):
-            yield None
+    proc = subprocess.run(['ping', '-c', '4', host], capture_output=True, text=True)
+    vals = []
+    for line in proc.stdout.split("\n"):
+        if "Request timeout" in line:
+            return None
+        if "100% packet loss" in line:
+            return None
         elif ms := re.search("time=(\d+).\d+ ms", line):
-            yield int(ms.group(1))
-        else:
-            print(line)
+            vals.append(int(ms.group(1)))
+    if not vals:
+        return None
+    return max(vals)  # TODO: p95?
 
 
 def ms2rgb(p: None | int, max=1000) -> tuple[int, int, int]:
@@ -70,7 +69,7 @@ async def main() -> None:
     args = parse_args()
 
     times = []
-    async with WLED(args.wled) as led:
+    async with wled.WLED(args.wled) as led:
         device = await led.update()
         led_count = device.info.leds.count
         time_per_led = ((args.timescale * 60) / led_count)
@@ -81,11 +80,7 @@ async def main() -> None:
         last_hour = -1
         while True:
             t1 = time()
-            samples = list(ping(args.host))
-            if None in samples:
-                sample = None
-            else:
-                sample = max(samples)
+            sample = ping(args.host)
 
             times.insert(0, sample)
             if len(times) > led_count:
@@ -99,7 +94,10 @@ async def main() -> None:
                 print(f"\n{current_hour:2d}: ", flush=True, end="")
             print(f"{ansi}#{ansi.OFF}", flush=True, end="")
 
-            await led.segment(0, on=True, brightness=255, individual=rgbs)
+            try:
+                await led.segment(0, on=True, brightness=255, individual=rgbs)
+            except wled.exceptions.WLEDConnectionError:
+                print("!", flush=True, end="")
 
             t2 = time()
             dur = t2 - t1
